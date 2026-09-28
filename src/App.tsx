@@ -81,8 +81,10 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  analyzePlanFollows,
   colorPresets,
   detectConflicts,
+  orderedScenes,
   roleLabels,
   statusLabels
 } from './data';
@@ -96,7 +98,7 @@ import {
   formatTime,
   useLightingDesk
 } from './state/useLightingDesk';
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole, Workspace } from './types';
+import type { Cue, CueConflict, FollowInfo, LightingPlan, Scene, UserRole, Workspace } from './types';
 
 const statusColors = {
   draft: 'orange',
@@ -114,16 +116,54 @@ function conflictLabel(conflict: CueConflict) {
   }[conflict.type];
 }
 
+function describeFollow(info: FollowInfo): string {
+  if (info.reason === 'missing') return '跟随目标已被移走或删除，跟随链阻断';
+  if (info.reason === 'cycle') return '跟随关系成环，无法确定触发时间，跟随阻断';
+  if (info.reason === 'forward') {
+    return info.crossScene
+      ? `跨场跟随的 ${info.targetCue!.number} 位于后续场次，跟随阻断`
+      : `跟随目标 ${info.targetCue!.number} 位于其后，跟随阻断`;
+  }
+  const prefix = info.crossScene ? `跨场跟随「${info.targetScene!.name}」` : '本场跟随';
+  return `${prefix} ${info.targetCue!.number} ${info.targetCue!.label}，目标结束后自动起光`;
+}
+
+function FollowBadge({ info }: { info: FollowInfo | undefined }) {
+  if (!info) return null;
+  if (info.blocked) {
+    return (
+      <Tooltip label={describeFollow(info)}>
+        <Tag size="sm" colorScheme="red" aria-label={describeFollow(info)}>跟随阻断</Tag>
+      </Tooltip>
+    );
+  }
+  if (info.crossScene) {
+    return (
+      <Tooltip label={describeFollow(info)}>
+        <Tag size="sm" variant="subtle" colorScheme="cyan" aria-label={describeFollow(info)}>
+          跨场跟随 {info.targetCue!.number}
+        </Tag>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip label={describeFollow(info)}>
+      <Tag size="sm" variant="subtle" colorScheme="purple">跟随 {info.targetCue!.number}</Tag>
+    </Tooltip>
+  );
+}
+
 interface SortableCueRowProps {
   cue: Cue;
   index: number;
   selected: boolean;
   disabled: boolean;
   conflicts: CueConflict[];
+  follow: FollowInfo | undefined;
   onSelect: () => void;
 }
 
-function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }: SortableCueRowProps) {
+function SortableCueRow({ cue, index, selected, disabled, conflicts, follow, onSelect }: SortableCueRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: cue.id,
     disabled
@@ -139,7 +179,9 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
       style={style}
       role="option"
       aria-selected={selected}
-      aria-label={`${cue.number} ${cue.label}，${statusLabels[cue.status]}，${conflicts.length} 个冲突`}
+      aria-label={`${cue.number} ${cue.label}，${statusLabels[cue.status]}，${
+        follow ? (follow.blocked ? '跟随阻断' : follow.crossScene ? `跨场跟随 ${follow.targetCue?.number ?? ''}` : `本场跟随 ${follow.targetCue?.number ?? ''}`) + '，' : ''
+      }${conflicts.length} 个冲突`}
       className={`cue-row ${selected ? 'active' : ''} ${isDragging ? 'dragging' : ''}`}
       borderBottomWidth="1px"
       borderColor="whiteAlpha.100"
@@ -170,7 +212,7 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
         <Box minW={0} flex="1">
           <Flex align="center" gap={2}>
             <Text fontWeight="650" noOfLines={1}>{cue.label}</Text>
-            {cue.followCueId ? <Tag size="sm" variant="subtle" colorScheme="purple">跟随</Tag> : null}
+            <FollowBadge info={follow} />
           </Flex>
           <Text color="whiteAlpha.500" fontSize="xs" noOfLines={1}>
             {cue.position} · {cue.channel} · {cue.color}
@@ -202,11 +244,12 @@ interface CueListProps {
   selectedCueId: string;
   canEdit: boolean;
   conflicts: CueConflict[];
+  follows: Map<string, FollowInfo>;
   onSelect: (cueId: string) => void;
   onReorder: (activeId: string, overId: string) => void;
 }
 
-function CueList({ scene, selectedCueId, canEdit, conflicts, onSelect, onReorder }: CueListProps) {
+function CueList({ scene, selectedCueId, canEdit, conflicts, follows, onSelect, onReorder }: CueListProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -230,6 +273,7 @@ function CueList({ scene, selectedCueId, canEdit, conflicts, onSelect, onReorder
               selected={cue.id === selectedCueId}
               disabled={!canEdit}
               conflicts={conflicts.filter((item) => item.cueId === cue.id)}
+              follow={follows.get(cue.id)}
               onSelect={() => onSelect(cue.id)}
             />
           ))}
@@ -256,8 +300,53 @@ interface InspectorProps {
   onSelectCue: (cueId: string) => void;
 }
 
+function FollowDraftHint({ draft, scene, plan }: { draft: Cue; scene: Scene; plan: LightingPlan }) {
+  if (!draft.followCueId) {
+    return <Text mt={1} color="whiteAlpha.500" fontSize="11px">跟随目标结束后触发；可选择前序场次的收尾提示，前场时间或顺序变化后本场自动接续重算。</Text>;
+  }
+  const scenes = orderedScenes(plan);
+  let target: { scene: Scene; cue: Cue } | undefined;
+  for (const targetScene of scenes) {
+    const found = targetScene.cues.find((item) => item.id === draft.followCueId);
+    if (found) {
+      target = { scene: targetScene, cue: found };
+      break;
+    }
+  }
+  if (!target) {
+    return <Text mt={1} color="red.300" fontSize="11px">跟随目标已被移走或删除，该关系将显示为阻断冲突。</Text>;
+  }
+  // 按场次顺序与场提示顺序展开为全局序号，自指由成环检测处理。
+  const flat: { id: string }[] = scenes.flatMap((item) => item.cues);
+  const ownerOrdinal = flat.findIndex((item) => item.id === draft.id);
+  const targetOrdinal = flat.findIndex((item) => item.id === target!.cue.id);
+  if (draft.followCueId === draft.id) {
+    return <Text mt={1} color="red.300" fontSize="11px">不能跟随自身，将形成阻断环。</Text>;
+  }
+  // 新增提示尚未写入时 ownerOrdinal 为 -1：此时任何目标都在其之前，不判阻断。
+  const isForward = ownerOrdinal >= 0 && targetOrdinal > ownerOrdinal;
+  if (isForward) {
+    return (
+      <Text mt={1} color="red.300" fontSize="11px">
+        {target.scene.id === scene.id
+          ? `目标 ${target.cue.number} 位于本提示之后，将阻断跟随。`
+          : `跨场目标 ${target.cue.number} 位于后续场次「${target.scene.name}」，将阻断跟随。`}
+      </Text>
+    );
+  }
+  const cross = target.scene.id !== scene.id;
+  return (
+    <Text mt={1} color={cross ? 'cyan.300' : 'whiteAlpha.500'} fontSize="11px">
+      {cross
+        ? `跨场跟随「${target.scene.name}」${target.cue.number} ${target.cue.label}，其收尾时间 ${formatTime(target.cue.endTime)} 变化时本场自动接续重算。`
+        : `本场跟随 ${target.cue.number} ${target.cue.label}，目标结束时间 ${formatTime(target.cue.endTime)}。`}
+    </Text>
+  );
+}
+
 function CueInspector({ cue, scene, workspace, canEdit, conflicts, onApply, onDelete, onSelectCue }: InspectorProps) {
   const [draft, setDraft] = useState<Cue | null>(cue ? structuredClone(cue) : null);
+  const activePlan = findActivePlan(workspace);
 
   useEffect(() => {
     setDraft(cue ? structuredClone(cue) : null);
@@ -380,7 +469,7 @@ function CueInspector({ cue, scene, workspace, canEdit, conflicts, onApply, onDe
       </SimpleGrid>
 
       <FormControl>
-        <FormLabel htmlFor="cue-follow">跟随关系</FormLabel>
+        <FormLabel htmlFor="cue-follow">跟随关系（可跨场次选择）</FormLabel>
         <Select
           id="cue-follow"
           value={draft.followCueId}
@@ -388,11 +477,20 @@ function CueInspector({ cue, scene, workspace, canEdit, conflicts, onApply, onDe
           onChange={(event) => update('followCueId', event.target.value)}
         >
           <option value="">不跟随，按顺序触发</option>
-          {scene.cues.filter((item) => item.id !== cue.id).map((item) => (
-            <option key={item.id} value={item.id}>{item.number} · {item.label}</option>
+          {orderedScenes(activePlan).map((targetScene) => (
+            <optgroup key={targetScene.id} label={targetScene.id === scene.id ? `${targetScene.name}（本场）` : `跨场来源 · ${targetScene.name}`}>
+              {targetScene.cues.filter((item) => item.id !== cue.id).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.number} · {item.label}{targetScene.id !== scene.id ? ` · ${targetScene.name}` : ''}
+                </option>
+              ))}
+            </optgroup>
           ))}
+          {draft.followCueId && !orderedScenes(activePlan).some((targetScene) => targetScene.cues.some((item) => item.id === draft.followCueId)) ? (
+            <option value={draft.followCueId}>⚠ 目标已被移走（{draft.followCueId}）</option>
+          ) : null}
         </Select>
-        <Text mt={1} color="whiteAlpha.500" fontSize="11px">跟随目标结束后触发；时间会在拖拽或参数变化后自动重算。</Text>
+        <FollowDraftHint draft={draft} scene={scene} plan={activePlan} />
       </FormControl>
 
       <FormControl>
@@ -579,7 +677,16 @@ export default function App() {
   const selectedCue = findActiveCue(workspace);
   const comparePlan = workspace.plans.find((plan) => plan.id === workspace.comparePlanId) ?? workspace.plans[0];
   const allConflicts = useMemo(() => detectConflicts(workspace.plans), [workspace.plans]);
+  const activeFollows = useMemo(() => analyzePlanFollows(activePlan), [activePlan]);
   const activeConflicts = allConflicts.filter((item) => item.planId === activePlan.id);
+  // 跨场流入关系：目标提示 id -> 来自其他场次的跟随信息
+  const incomingCrossFollows = useMemo(() => {
+    const map = new Map<string, FollowInfo[]>();
+    for (const info of activeFollows.values()) {
+      if (info.crossScene) map.set(info.targetId, [...(map.get(info.targetId) ?? []), info]);
+    }
+    return map;
+  }, [activeFollows]);
   const activeCueConflicts = selectedCue
     ? allConflicts.filter((item) => item.cueId === selectedCue.id)
     : [];
@@ -1044,6 +1151,7 @@ export default function App() {
                 selectedCueId={workspace.selectedCueId}
                 canEdit={editable}
                 conflicts={activeConflicts}
+                follows={activeFollows}
                 onSelect={(cueId) => selectCue(activeScene.id, cueId)}
                 onReorder={reorderCue}
               />
@@ -1101,10 +1209,17 @@ export default function App() {
                 <TabPanel px={4} pb={5}>
                   {activeScene ? (
                     <VStack align="stretch" spacing={3}>
+                      <HStack fontSize="10px" color="whiteAlpha.500" spacing={3}>
+                        <Tag size="sm" variant="subtle" colorScheme="purple">本场跟随</Tag>
+                        <Tag size="sm" variant="subtle" colorScheme="cyan">跨场跟随</Tag>
+                        <Tag size="sm" colorScheme="red">跟随阻断</Tag>
+                      </HStack>
                       {activeScene.cues.map((cue, index) => {
-                        const followed = activeScene.cues.find((item) => item.id === cue.followCueId);
+                        const follow = activeFollows.get(cue.id);
+                        const followed = follow?.targetCue;
+                        const incoming = incomingCrossFollows.get(cue.id) ?? [];
                         return (
-                          <Box key={cue.id} p={3} borderRadius="lg" bg="blackAlpha.200" borderWidth="1px" borderColor="whiteAlpha.100">
+                          <Box key={cue.id} p={3} borderRadius="lg" bg="blackAlpha.200" borderWidth="1px" borderColor={follow?.blocked ? 'red.600' : 'whiteAlpha.100'}>
                             <Flex align="center" gap={2}>
                               <CircleDot size={14} color={cue.colorHex} />
                               <Text fontFamily="mono" color="amber.300" fontSize="sm">{cue.number}</Text>
@@ -1112,12 +1227,58 @@ export default function App() {
                               <Spacer />
                               <Text color="whiteAlpha.500" fontSize="xs">{formatTime(cue.startTime)}</Text>
                             </Flex>
-                            <Box ml={4} mt={3} borderLeftWidth="2px" borderColor={followed ? 'purple.400' : 'whiteAlpha.200'} pl={3}>
+                            {incoming.length ? (
+                              <Box mt={2} ml={4} pl={3} borderLeftWidth="2px" borderColor="cyan.500">
+                                <Text color="cyan.300" fontSize="10px" mb={1}>后续场次跨场跟随本提示：</Text>
+                                <HStack spacing={1} wrap="wrap">
+                                  {incoming.map((item) => (
+                                    <Tag
+                                      key={`${item.owner.id}-incoming`}
+                                      size="sm"
+                                      colorScheme={item.blocked ? 'red' : 'cyan'}
+                                      as="button"
+                                      onClick={() => selectCue(item.ownerScene.id, item.owner.id)}
+                                      aria-label={`跳转到 ${item.ownerScene.name} ${item.owner.number}`}
+                                    >
+                                      {item.ownerScene.name} · {item.owner.number}{item.blocked ? ' · 阻断' : ''}
+                                    </Tag>
+                                  ))}
+                                </HStack>
+                              </Box>
+                            ) : null}
+                            <Box ml={4} mt={3} borderLeftWidth="2px" borderColor={follow?.blocked ? 'red.500' : followed ? (follow.crossScene ? 'cyan.400' : 'purple.400') : 'whiteAlpha.200'} pl={3}>
                               {followed ? (
-                                <>
-                                  <Flex align="center" gap={1} color="purple.300" fontSize="xs"><ArrowDown size={12} />跟随 {followed.number} · {followed.label}</Flex>
-                                  <Text mt={1} color="whiteAlpha.500" fontSize="10px">目标结束时间 {formatTime(followed.endTime)}</Text>
-                                </>
+                                follow?.blocked ? (
+                                  <>
+                                    <Flex align="center" gap={1} color="red.300" fontSize="xs"><AlertCircle size={12} />{describeFollow(follow)}</Flex>
+                                    <Text mt={1} color="whiteAlpha.500" fontSize="10px">
+                                      {follow.reason === 'forward' && follow.targetScene ? `目标在「${follow.targetScene.name}」${followed.number}，位于本提示之后` : ''}
+                                      {follow.reason === 'cycle' ? '跟随链首尾相接' : ''}
+                                      {follow.reason === 'missing' ? '目标 id：' + follow.targetId : ''}
+                                    </Text>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Flex align="center" gap={1} color={follow?.crossScene ? 'cyan.300' : 'purple.300'} fontSize="xs">
+                                      <ArrowDown size={12} />
+                                      {follow?.crossScene ? `跨场跟随「${follow.targetScene!.name}」` : '本场跟随'}
+                                      <Tag
+                                        size="sm"
+                                        variant="ghost"
+                                        colorScheme={follow?.crossScene ? 'cyan' : 'purple'}
+                                        as="button"
+                                        onClick={() => follow?.targetScene && selectCue(follow.targetScene.id, followed.id)}
+                                      >
+                                        {followed.number} · {followed.label}
+                                      </Tag>
+                                    </Flex>
+                                    <Text mt={1} color="whiteAlpha.500" fontSize="10px">
+                                      {follow?.crossScene ? `跨场来源：${follow.targetScene!.name} · ` : ''}目标结束时间 {formatTime(followed.endTime)}
+                                    </Text>
+                                  </>
+                                )
+                              ) : follow?.blocked ? (
+                                <Flex align="center" gap={1} color="red.300" fontSize="xs"><AlertCircle size={12} />{describeFollow(follow)}</Flex>
                               ) : (
                                 <Flex align="center" gap={1} color="whiteAlpha.500" fontSize="xs"><Pause size={12} />按前一条结束或手动 GO 触发</Flex>
                               )}

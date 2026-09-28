@@ -41,6 +41,23 @@ export interface LightingPlan {
   scenes: Scene[];
 }
 
+export type FollowBlockReason = 'missing' | 'forward' | 'cycle';
+
+export interface FollowInfo {
+  owner: Cue;
+  ownerScene: Scene;
+  targetId: string;
+  targetScene?: Scene;
+  targetCue?: Cue;
+  /** 跟随目标位于其他场次（跨场收尾触发） */
+  crossScene: boolean;
+  /** 目标缺失、位于其后或关系成环时为 true，跟随链被阻断 */
+  blocked: boolean;
+  reason?: FollowBlockReason;
+  /** 成环时环上的全部提示 id（从本提示起按跟随方向排列） */
+  cycleNodeIds?: string[];
+}
+
 export interface CueConflict {
   id: string;
   planId: string;

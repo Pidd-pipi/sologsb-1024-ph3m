@@ -1,4 +1,4 @@
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole } from './types';
+import type { Cue, CueConflict, FollowInfo, LightingPlan, Scene, UserRole } from './types';
 
 const FIXED_TIME = '2026-09-25T02:00:00.000Z';
 
@@ -82,20 +82,20 @@ const mainPlan: LightingPlan = {
       cue('Q4', '雾门显现', '后区', 'Beam 2', '天青', '#0EA5E9', 58, 5, 12, 8, '', '雾机启动后可见', '通道尚未实测。', 'draft')
     ]),
     scene('scene-2', '独白 · 失语', 2, false, [
-      cue('Q10', '独白收束', '前区', 'FOH 1-4', '琥珀', '#F59E0B', 46, 7, 32, 9, '', '演员坐于长椅', '压低背景，仅保留边光。'),
+      cue('Q10', '独白收束', '前区', 'FOH 1-4', '琥珀', '#F59E0B', 46, 7, 32, 9, 'cue-4', '序章黑场后起光', '跟随序章 Q4 雾门显现的收尾，跨场起光。'),
       cue('Q11', '呼吸变化', '前区', 'FOH L 3', '暖白', '#FFF1C7', 72, 3, 8, 3, 'cue-5', '吸气点触发', '与台词“我听见”同步。', 'ready'),
-      cue('Q12', '影子分裂', '侧幕', 'Side 5', '品红', '#D946EF', 54, 2, 15, 7, 'cue-11', '两次呼吸后', '需要检查侧幕遮挡。', 'draft'),
+      cue('Q12', '影子分裂', '侧幕', 'Side 5', '品红', '#D946EF', 54, 2, 15, 7, 'cue-6', '两次呼吸后', '需要检查侧幕遮挡。', 'draft'),
       cue('Q13', '冷色侵入', '全台', 'Grand Master', '深蓝', '#1D4ED8', 38, 10, 24, 12, '', '音乐低频进入', '与 Q12 通道存在叠光风险。')
     ]),
     scene('scene-3', '群舞 · 潮汐', 3, false, [
-      cue('Q20', '群舞起光', '后区', 'Dance 1-6', '松绿', '#059669', 68, 2, 18, 4, '', '第一组舞者进入', '两侧亮度需平衡。', 'ready'),
+      cue('Q20', '群舞起光', '后区', 'Dance 1-6', '松绿', '#059669', 68, 2, 18, 4, 'cue-8', '独白场黑场后起光', '跟随独白场 Q13 冷色侵入的收尾，跨场起光。', 'ready'),
       cue('Q21', '潮线推移', '侧区', 'Side 1-4', '天青', '#0EA5E9', 60, 5, 16, 5, 'cue-9', '第二组越过中线', '跟随舞者视线。'),
       cue('Q22', '高点爆闪', '全台', 'Grand Master', '暖白', '#FFF1C7', 92, 0.3, 0.8, 8, 'cue-10', '定音鼓重音', '确认频闪安全。', 'draft'),
       cue('Q23', '潮退', '后区', 'Dance 1-6', '深蓝', '#1D4ED8', 26, 12, 28, 14, '', '音乐进入尾奏', '')
     ]),
     scene('scene-4', '终场 · 归岸', 4, true, [
-      cue('Q30', '归岸定点', '前区', 'FOH 1-2', '暖白', '#FFF1C7', 48, 8, 26, 10, '', '演员回到长椅', '已与导演确认。', 'confirmed'),
-      cue('Q31', '星空落幕', '天幕', 'Cyc 2', '薰衣草', '#8B5CF6', 34, 6, 36, 16, 'cue-12', '演员抬头后', '冻结场次，保留最终状态。', 'confirmed')
+      cue('Q30', '归岸定点', '前区', 'FOH 1-2', '暖白', '#FFF1C7', 48, 8, 26, 10, 'cue-12', '群舞潮退后起光', '跟随群舞场 Q23 潮退的收尾，跨场起光；已与导演确认。', 'confirmed'),
+      cue('Q31', '星空落幕', '天幕', 'Cyc 2', '薰衣草', '#8B5CF6', 34, 6, 36, 16, 'cue-13', 'Q30 定点后演员抬头', '本场跟随 Q30 归岸定点；冻结场次，保留最终状态。', 'confirmed')
     ])
   ]
 };
@@ -136,9 +136,120 @@ const tourPlan: LightingPlan = {
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
 
+export function orderedScenes(plan: LightingPlan): Scene[] {
+  return [...plan.scenes].sort((a, b) => a.order - b.order);
+}
+
+/**
+ * 在整个方案范围内建立提示索引：跟随关系可以指向任意场次。
+ */
+export function indexPlanCues(plan: LightingPlan) {
+  const cueToScene = new Map<Cue, Scene>();
+  const cueById = new Map<string, Cue>();
+  for (const scene of orderedScenes(plan)) {
+    for (const cue of scene.cues) {
+      cueToScene.set(cue, scene);
+      cueById.set(cue.id, cue);
+    }
+  }
+  return { cueToScene, cueById };
+}
+
+/**
+ * 分析方案内全部跟随关系（不依赖已重算的时间）。
+ * 阻断条件：目标被移走（缺失）、目标在本提示之后（含后续场次）、跟随关系成环。
+ */
+export function analyzePlanFollows(plan: LightingPlan): Map<string, FollowInfo> {
+  const scenes = orderedScenes(plan);
+  const cueToScene = new Map<Cue, Scene>();
+  const cueById = new Map<string, Cue>();
+  const globalOrder = new Map<Cue, number>();
+  let ordinal = 0;
+  for (const scene of scenes) {
+    for (const cue of scene.cues) {
+      cueToScene.set(cue, scene);
+      cueById.set(cue.id, cue);
+      globalOrder.set(cue, ordinal);
+      ordinal += 1;
+    }
+  }
+
+  const infos = new Map<string, FollowInfo>();
+  for (const scene of scenes) {
+    for (const cue of scene.cues) {
+      if (!cue.followCueId) continue;
+      const targetCue = cueById.get(cue.followCueId);
+      const targetScene = targetCue ? cueToScene.get(targetCue) : undefined;
+      infos.set(cue.id, {
+        owner: cue,
+        ownerScene: scene,
+        targetId: cue.followCueId,
+        targetCue,
+        targetScene,
+        crossScene: Boolean(targetCue && targetScene && targetScene.id !== scene.id),
+        blocked: false
+      });
+    }
+  }
+
+  // 跟随关系是单向出度 ≤ 1 的链；找出环上的全部提示。
+  const inCycle = new Set<string>();
+  for (const start of infos.keys()) {
+    if (inCycle.has(start)) continue;
+    const path: string[] = [];
+    const seen = new Map<string, number>();
+    let current: string | undefined = start;
+    while (current) {
+      if (seen.has(current)) {
+        const cycleStart = seen.get(current)!;
+        for (let i = cycleStart; i < path.length; i += 1) inCycle.add(path[i]);
+        break;
+      }
+      seen.set(current, path.length);
+      path.push(current);
+      current = cueById.has(current) ? infos.get(current)?.targetId : undefined;
+    }
+  }
+
+  for (const [id, info] of infos) {
+    if (inCycle.has(id)) {
+      const chain: string[] = [];
+      let current = id;
+      const guard = new Set<string>();
+      while (current && !guard.has(current)) {
+        guard.add(current);
+        chain.push(current);
+        current = infos.get(current)?.targetId ?? '';
+      }
+      const cycleNodeIds = chain.filter((nodeId) => inCycle.has(nodeId));
+      infos.set(id, { ...info, blocked: true, reason: 'cycle', cycleNodeIds });
+      continue;
+    }
+    if (!info.targetCue) {
+      infos.set(id, { ...info, blocked: true, reason: 'missing' });
+      continue;
+    }
+    if ((globalOrder.get(info.targetCue) ?? 0) >= (globalOrder.get(info.owner) ?? 0)) {
+      infos.set(id, { ...info, blocked: true, reason: 'forward' });
+    }
+  }
+
+  return infos;
+}
+
+/** 在方案内按 id 查找提示及其所属场次（跨场查找）。 */
+export function findCueInPlan(plan: LightingPlan, cueId: string): { scene: Scene; cue: Cue } | undefined {
+  for (const scene of orderedScenes(plan)) {
+    const cue = scene.cues.find((item) => item.id === cueId);
+    if (cue) return { scene, cue };
+  }
+  return undefined;
+}
+
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {
-    const scenes = [...plan.scenes].sort((a, b) => a.order - b.order);
+    const { cueById } = indexPlanCues(plan);
+    const scenes = orderedScenes(plan);
     let absoluteCursor = 0;
     for (const scene of scenes) {
       scene.startTime = absoluteCursor;
@@ -146,9 +257,8 @@ export function recalculatePlans(plans: LightingPlan[]) {
       for (const item of scene.cues) {
         const duration = Math.max(0.1, item.fadeIn + item.hold + item.fadeOut);
         item.duration = Number(duration.toFixed(2));
-        const followed = item.followCueId
-          ? scene.cues.find((candidate) => candidate.id === item.followCueId)
-          : undefined;
+        // 跟随目标在全方案范围内解析：前一场次的收尾变化会沿时间游标自动传导到本场。
+        const followed = item.followCueId ? cueById.get(item.followCueId) : undefined;
         const followTime = followed?.endTime ? followed.endTime : sceneCursor;
         item.startTime = Number(Math.max(sceneCursor, followTime).toFixed(2));
         item.endTime = Number((item.startTime + duration).toFixed(2));
@@ -164,6 +274,7 @@ export function recalculatePlans(plans: LightingPlan[]) {
 export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
   const conflicts: CueConflict[] = [];
   for (const plan of plans) {
+    const follows = analyzePlanFollows(plan);
     for (const scene of plan.scenes) {
       const byChannel = new Map<string, Cue[]>();
       const positions = new Map<string, Cue[]>();
@@ -185,27 +296,43 @@ export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
             message: `${item.number} ${errors.join('、')}`
           });
         }
-        if (!item.followCueId) continue;
-        const followed = scene.cues.find((candidate) => candidate.id === item.followCueId);
-        if (!followed) {
+
+        const follow = follows.get(item.id);
+        if (!follow) continue;
+        if (follow.reason === 'missing') {
           conflicts.push({
-            id: `${plan.id}-${scene.id}-${item.id}-follow`,
+            id: `${plan.id}-${scene.id}-${item.id}-follow-missing`,
             planId: plan.id,
             sceneId: scene.id,
             cueId: item.id,
             severity: 'error',
             type: 'follow-order',
-            message: `${item.number} 的跟随提示不存在于当前场次`
+            message: `${item.number} 的跟随目标已被移走或删除，跟随链阻断，请重新指定`
           });
-        } else if ((followed.startTime ?? 0) >= (item.startTime ?? 0)) {
+        } else if (follow.reason === 'forward') {
           conflicts.push({
-            id: `${plan.id}-${scene.id}-${item.id}-follow-order`,
+            id: `${plan.id}-${scene.id}-${item.id}-follow-forward`,
             planId: plan.id,
             sceneId: scene.id,
             cueId: item.id,
-            severity: 'warning',
+            severity: 'error',
             type: 'follow-order',
-            message: `${item.number} 的跟随目标不在其之前完成`
+            message: follow.crossScene
+              ? `${item.number} 跨场跟随的 ${follow.targetCue!.number} 位于后续场次「${follow.targetScene!.name}」，无法在其之前收尾，跟随阻断`
+              : `${item.number} 的跟随目标 ${follow.targetCue!.number} 位于其后，跟随阻断`
+          });
+        } else if (follow.reason === 'cycle') {
+          const chain = (follow.cycleNodeIds ?? [])
+            .map((nodeId) => follows.get(nodeId)?.owner.number ?? nodeId)
+            .join(' → ');
+          conflicts.push({
+            id: `${plan.id}-${scene.id}-${item.id}-follow-cycle`,
+            planId: plan.id,
+            sceneId: scene.id,
+            cueId: item.id,
+            severity: 'error',
+            type: 'follow-order',
+            message: `${item.number} 的跟随关系成环（${chain} → ${item.number}），无法确定触发时间，跟随阻断`
           });
         }
       }
