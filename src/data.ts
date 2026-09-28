@@ -89,7 +89,7 @@ const mainPlan: LightingPlan = {
     ]),
     scene('scene-3', '群舞 · 潮汐', 3, false, [
       cue('Q20', '群舞起光', '后区', 'Dance 1-6', '松绿', '#059669', 68, 2, 18, 4, '', '第一组舞者进入', '两侧亮度需平衡。', 'ready'),
-      cue('Q21', '潮线推移', '侧区', 'Side 1-4', '天青', '#0EA5E9', 60, 5, 16, 5, 'cue-9', '第二组越过中线', '跟随舞者视线。'),
+      cue('Q21', '潮线推移', '侧区', 'Side 1-4', '天青', '#0EA5E9', 60, 5, 16, 5, 'cue-4', '第二组越过中线', '跟随舞者视线，跨场承接序章 Q4「雾门显现」收尾。'),
       cue('Q22', '高点爆闪', '全台', 'Grand Master', '暖白', '#FFF1C7', 92, 0.3, 0.8, 8, 'cue-10', '定音鼓重音', '确认频闪安全。', 'draft'),
       cue('Q23', '潮退', '后区', 'Dance 1-6', '深蓝', '#1D4ED8', 26, 12, 28, 14, '', '音乐进入尾奏', '')
     ]),
@@ -108,11 +108,11 @@ const coolPlan: LightingPlan = {
   scenes: [
     scene('cool-scene-1', '序章 · 入梦（冷调）', 1, false, [
       cue('C1', '冷场', '全台', 'Grand Master', '深蓝', '#1D4ED8', 14, 5, 8, 5, '', '场灯渐暗', '冷调版本无全黑场。', 'ready'),
-      cue('C2', '逆光月幕', '天幕', 'Cyc 1', '天青', '#0EA5E9', 72, 10, 18, 8, 'cue-13', '月幕升起', '')
+      cue('C2', '逆光月幕', '天幕', 'Cyc 1', '天青', '#0EA5E9', 72, 10, 18, 8, 'cue-18', '月幕升起', '跨场跟随独白场 C11，与对方互指形成跨场跟随环（示例阻断冲突）。')
     ]),
     scene('cool-scene-2', '独白 · 失语（冷调）', 2, false, [
       cue('C10', '侧逆光', '左后', 'Beam 1', '薰衣草', '#8B5CF6', 58, 4, 28, 10, '', '演员背向观众', ''),
-      cue('C11', '边缘呼吸', '右侧', 'Side 5', '品红', '#D946EF', 42, 1, 7, 4, 'cue-14', '台词停顿', '')
+      cue('C11', '边缘呼吸', '右侧', 'Side 5', '品红', '#D946EF', 42, 1, 7, 4, 'cue-16', '台词停顿', '跨场跟随序章场 C2，两场均声明跟随对方形成跨场跟随环（示例阻断冲突）。')
     ])
   ]
 };
@@ -125,7 +125,7 @@ const tourPlan: LightingPlan = {
   scenes: [
     scene('tour-scene-1', '序章 · 入梦', 1, false, [
       cue('T1', '场灯收束', '全台', 'Master', '暖白', '#FFF1C7', 18, 3, 5, 4, '', '开场', '巡演设备清单已确认。', 'ready'),
-      cue('T2', '蓝色天幕', '天幕', 'Wash A', '深蓝', '#1D4ED8', 55, 6, 24, 8, 'cue-15', '演员入场', '')
+      cue('T2', '蓝色天幕', '天幕', 'Wash A', '深蓝', '#1D4ED8', 55, 6, 24, 8, 'cue-15', '演员入场', '跟随目标属于其他方案，示例“前场提示被移走”阻断冲突。')
     ]),
     scene('tour-scene-2', '群舞 · 潮汐', 2, false, [
       cue('T10', '侧光推进', '后区', 'Wash B', '松绿', '#059669', 64, 2, 20, 5, '', '群舞起点', ''),
@@ -136,8 +136,95 @@ const tourPlan: LightingPlan = {
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
 
+/**
+ * 一条提示及其在同方案内的解析结果。
+ * sceneId 为空表示跟随目标在整个方案中都找不到（可能被删除、移走或属于其他方案）。
+ */
+export interface ResolvedCue {
+  cue: Cue;
+  scene: Scene;
+  sceneId: string;
+}
+
+export interface FollowAnalysis {
+  /** 全剧提示索引：cueId -> 提示与其所属场次 */
+  index: Map<string, ResolvedCue>;
+  /** 全局顺序序号（按场次 order、场内需提示数组顺序） */
+  orderIndex: Map<string, number>;
+  /** 陷入跟随环的提示 id 集合 */
+  cycleCueIds: Set<string>;
+  scenes: Scene[];
+}
+
+/** 按场次顺序、再按场内数组顺序展平方案。 */
+export function flattenPlan(plan: LightingPlan): ResolvedCue[] {
+  return [...plan.scenes]
+    .sort((a, b) => a.order - b.order)
+    .flatMap((scene) => scene.cues.map((cue) => ({ cue, scene, sceneId: scene.id })));
+}
+
+/** 在方案范围内解析跟随目标；支持跨场次，找不到返回 undefined。 */
+export function findFollowTarget(plan: LightingPlan, cueId: string): ResolvedCue | undefined {
+  if (!cueId) return undefined;
+  for (const scene of plan.scenes) {
+    const cue = scene.cues.find((candidate) => candidate.id === cueId);
+    if (cue) return { cue, scene, sceneId: scene.id };
+  }
+  return undefined;
+}
+
+/**
+ * 建立全剧跟随关系分析：索引、全局顺序与成环集合。
+ * 只有指向方案内真实存在提示的跟随边才会参与成环判断。
+ */
+export function analyzeFollows(plan: LightingPlan): FollowAnalysis {
+  const ordered = flattenPlan(plan);
+  const index = new Map<string, ResolvedCue>();
+  const orderIndex = new Map<string, number>();
+  ordered.forEach((entry, position) => {
+    index.set(entry.cue.id, entry);
+    orderIndex.set(entry.cue.id, position);
+  });
+
+  // 迭代式 DFS：每个节点至多一条跟随出边，沿链染色即可精确收集环上节点，
+  // 环的上游链不会被误判（如 A→B→C→B 只标记 B、C）。
+  const cycleCueIds = new Set<string>();
+  const color = new Map<string, 0 | 1>(); // 0=当前路径上，1=已探查完
+  for (const start of ordered) {
+    if (color.has(start.cue.id)) continue;
+    const path: string[] = [];
+    const positionInPath = new Map<string, number>();
+    let current: string | undefined = start.cue.id;
+    while (current !== undefined) {
+      const mark = color.get(current);
+      if (mark === 1) break; // 已探查完的链，不可能再构成新环
+      if (mark === 0) {
+        const at = positionInPath.get(current) ?? 0;
+        for (let i = at; i < path.length; i += 1) cycleCueIds.add(path[i]);
+        break;
+      }
+      color.set(current, 0);
+      positionInPath.set(current, path.length);
+      path.push(current);
+      const targetId: string | undefined = index.get(current)?.cue.followCueId;
+      current = targetId && index.has(targetId) ? targetId : undefined;
+    }
+    path.forEach((id) => color.set(id, 1));
+  }
+
+  return { index, orderIndex, cycleCueIds, scenes: ordered.map((entry) => entry.scene).filter((scene, i, arr) => arr.indexOf(scene) === i) };
+}
+
+/**
+ * 全剧时间重算：按场次顺序与场内顺序单遍调度。
+ * - 无跟随或跟随边不可用时，提示在本场上一条之后依次起光；
+ * - 跟随目标位于本方案更靠前位置（含前序场次）时，在目标结束时起光，
+ *   前场提示的时间或顺序变化会通过目标 endTime 与场次游标自然传导，后续场次自动续接重算；
+ * - 成环或目标位于自身之后的跟随边不可用于调度（由冲突面板报阻断）。
+ */
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {
+    const analysis = analyzeFollows(plan);
     const scenes = [...plan.scenes].sort((a, b) => a.order - b.order);
     let absoluteCursor = 0;
     for (const scene of scenes) {
@@ -146,10 +233,12 @@ export function recalculatePlans(plans: LightingPlan[]) {
       for (const item of scene.cues) {
         const duration = Math.max(0.1, item.fadeIn + item.hold + item.fadeOut);
         item.duration = Number(duration.toFixed(2));
-        const followed = item.followCueId
-          ? scene.cues.find((candidate) => candidate.id === item.followCueId)
-          : undefined;
-        const followTime = followed?.endTime ? followed.endTime : sceneCursor;
+        const targetId = item.followCueId;
+        const target = targetId ? analysis.index.get(targetId) : undefined;
+        const targetIsEarlier =
+          target !== undefined && (analysis.orderIndex.get(target.cue.id) ?? 0) < (analysis.orderIndex.get(item.id) ?? 0);
+        const edgeUsable = targetIsEarlier && !analysis.cycleCueIds.has(item.id);
+        const followTime = edgeUsable && target ? target.cue.endTime ?? sceneCursor : sceneCursor;
         item.startTime = Number(Math.max(sceneCursor, followTime).toFixed(2));
         item.endTime = Number((item.startTime + duration).toFixed(2));
         sceneCursor = Math.max(sceneCursor, item.endTime);
@@ -161,9 +250,25 @@ export function recalculatePlans(plans: LightingPlan[]) {
   return plans;
 }
 
+function followChainText(analysis: FollowAnalysis, startId: string): string {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  let id: string | undefined = startId;
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const entry = analysis.index.get(id);
+    if (!entry) break;
+    labels.push(entry.cue.number);
+    id = entry.cue.followCueId || undefined;
+  }
+  if (id && seen.has(id)) labels.push(analysis.index.get(id)?.cue.number ?? id);
+  return labels.join(' → ');
+}
+
 export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
   const conflicts: CueConflict[] = [];
   for (const plan of plans) {
+    const analysis = analyzeFollows(plan);
     for (const scene of plan.scenes) {
       const byChannel = new Map<string, Cue[]>();
       const positions = new Map<string, Cue[]>();
@@ -185,28 +290,48 @@ export function detectConflicts(plans: LightingPlan[]): CueConflict[] {
             message: `${item.number} ${errors.join('、')}`
           });
         }
-        if (!item.followCueId) continue;
-        const followed = scene.cues.find((candidate) => candidate.id === item.followCueId);
-        if (!followed) {
-          conflicts.push({
-            id: `${plan.id}-${scene.id}-${item.id}-follow`,
-            planId: plan.id,
-            sceneId: scene.id,
-            cueId: item.id,
-            severity: 'error',
-            type: 'follow-order',
-            message: `${item.number} 的跟随提示不存在于当前场次`
-          });
-        } else if ((followed.startTime ?? 0) >= (item.startTime ?? 0)) {
-          conflicts.push({
-            id: `${plan.id}-${scene.id}-${item.id}-follow-order`,
-            planId: plan.id,
-            sceneId: scene.id,
-            cueId: item.id,
-            severity: 'warning',
-            type: 'follow-order',
-            message: `${item.number} 的跟随目标不在其之前完成`
-          });
+
+        // 跟随关系阻断冲突：成环 > 目标移走/缺失 > 目标跑到了后面（含跨场次）。
+        if (item.followCueId) {
+          const target = analysis.index.get(item.followCueId);
+          if (analysis.cycleCueIds.has(item.id)) {
+            conflicts.push({
+              id: `${plan.id}-${scene.id}-${item.id}-follow-cycle`,
+              planId: plan.id,
+              sceneId: scene.id,
+              cueId: item.id,
+              severity: 'error',
+              type: 'follow-cycle',
+              message: `${item.number} 的跟随关系成环（${followChainText(analysis, item.id)}），无法确定起光时间，请解除其中一条跟随`
+            });
+          } else if (!target) {
+            conflicts.push({
+              id: `${plan.id}-${scene.id}-${item.id}-follow`,
+              planId: plan.id,
+              sceneId: scene.id,
+              cueId: item.id,
+              severity: 'error',
+              type: 'follow-order',
+              message: `${item.number} 的跟随提示已被移走或不属于本方案，跨场跟随链已阻断`
+            });
+          } else {
+            const ownOrder = analysis.orderIndex.get(item.id) ?? 0;
+            const targetOrder = analysis.orderIndex.get(target.cue.id) ?? 0;
+            if (targetOrder >= ownOrder) {
+              const crossScene = target.sceneId !== scene.id;
+              conflicts.push({
+                id: `${plan.id}-${scene.id}-${item.id}-follow-order`,
+                planId: plan.id,
+                sceneId: scene.id,
+                cueId: item.id,
+                severity: 'error',
+                type: 'follow-order',
+                message: crossScene
+                  ? `${item.number} 跟随的 ${target.cue.number} 在后面的场次「${target.scene.name}」，跨场跟随只能承接前序场次`
+                  : `${item.number} 的跟随目标 ${target.cue.number} 排在它后面，无法跟随一个尚未执行的提示`
+              });
+            }
+          }
         }
       }
 

@@ -14,6 +14,7 @@ export interface Cue {
   fadeIn: number;
   hold: number;
   fadeOut: number;
+  /** 跟随目标提示 id；可指向同方案内任意场次的提示（跨场次跟随）。 */
   followCueId: string;
   targetNote: string;
   notes: string;
@@ -47,7 +48,13 @@ export interface CueConflict {
   cueId: string;
   sceneId: string;
   severity: ConflictSeverity;
-  type: 'channel-overlap' | 'follow-order' | 'missing-data' | 'duplicate-position' | 'duration';
+  type:
+    | 'channel-overlap'
+    | 'follow-order'
+    | 'follow-cycle'
+    | 'missing-data'
+    | 'duplicate-position'
+    | 'duration';
   message: string;
 }
 
